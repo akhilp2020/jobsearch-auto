@@ -1,0 +1,13 @@
+[project]
+name = "types-shared"
+version = "0.1.0"
+description = "Shared type definitions"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"

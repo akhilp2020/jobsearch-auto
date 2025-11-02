@@ -1,0 +1,74 @@
+version: "3.9"
+
+services:
+  orchestrator:
+    build:
+      context: ./services/orchestrator
+    container_name: orchestrator
+    env_file: .env
+    ports:
+      - "8001:8000"
+
+  profile_svc:
+    build:
+      context: ./services/profile_svc
+    container_name: profile_svc
+    env_file: .env
+    ports:
+      - "8002:8000"
+
+  job_finder_svc:
+    build:
+      context: ./services/job_finder_svc
+    container_name: job_finder_svc
+    env_file: .env
+    ports:
+      - "8003:8000"
+
+  cv_builder_svc:
+    build:
+      context: ./services/cv_builder_svc
+    container_name: cv_builder_svc
+    env_file: .env
+    ports:
+      - "8004:8000"
+
+  doc_builder_svc:
+    build:
+      context: ./services/doc_builder_svc
+    container_name: doc_builder_svc
+    env_file: .env
+    ports:
+      - "8005:8000"
+
+  apply_svc:
+    build:
+      context: ./services/apply_svc
+    container_name: apply_svc
+    env_file: .env
+    ports:
+      - "8006:8000"
+
+  storage_svc:
+    build:
+      context: ./services/storage_svc
+    container_name: storage_svc
+    env_file: .env
+    ports:
+      - "8007:8000"
+
+  notify_svc:
+    build:
+      context: ./services/notify_svc
+    container_name: notify_svc
+    env_file: .env
+    ports:
+      - "8008:8000"
+
+  audit_svc:
+    build:
+      context: ./services/audit_svc
+    container_name: audit_svc
+    env_file: .env
+    ports:
+      - "8009:8000"

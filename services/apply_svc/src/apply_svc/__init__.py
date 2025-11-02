@@ -1,0 +1,1 @@
+"""Application handling service package."""
