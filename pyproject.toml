@@ -28,6 +28,9 @@ members = [
   "mcp/*"
 ]
 
+[tool.uv.sources]
+"mcp-clients" = { workspace = true }
+
 [tool.black]
 line-length = 88
 include = "\\.pyi?$"

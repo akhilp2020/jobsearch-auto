@@ -770,6 +770,12 @@ wheels = [
 name = "mcp-clients"
 version = "0.1.0"
 source = { editable = "libs/mcp_clients" }
+dependencies = [
+    { name = "mcp" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "mcp", specifier = ">=1.20.0" }]
 
 [[package]]
 name = "mcp-comm"
@@ -1569,6 +1575,7 @@ version = "0.1.0"
 source = { editable = "services/storage_svc" }
 dependencies = [
     { name = "fastapi" },
+    { name = "mcp-clients" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1580,6 +1587,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.111.0" },
+    { name = "mcp-clients", editable = "libs/mcp_clients" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29.0" },
 ]
