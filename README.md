@@ -9,6 +9,8 @@ Monorepo scaffold for job search automation services. This repository currently 
   ```
   ~/JobSearch/
     profile/
+      canonical_profile.json
+      profile_history.jsonl
     jobs/{company}_{title}_{jobId}/
     logs/
     exports/
@@ -26,7 +28,9 @@ Monorepo scaffold for job search automation services. This repository currently 
     -H "Content-Type: application/json" \
     -d '{"path":"exports/test.txt","content":"ok","kind":"text"}'
   ```
-- Tests in `tests/test_storage_svc.py` swap in an in-process MCP filesystem client and verify writes, listings, and policy validation. Run them with:
+- `POST /ingest-cv` extracts structured resume data using both heuristics and the configured LLM, storing a canonical profile JSON at `profile/canonical_profile.json`.
+- `GET /profile` returns the latest canonical profile; `POST /clarify` surfaces targeted follow-up questions (salary target, relocation, visa, remote %, industries, seniority, target titles); `POST /clarify/answers` merges the responses into the canonical profile and appends a diff entry to `profile/profile_history.jsonl`.
+- Tests in `tests/test_storage_svc.py` swap in an in-process MCP filesystem client and verify writes, listings, CV ingestion, clarification flows, and policy validation. Run them with:
   ```bash
   uv run pytest tests/test_storage_svc.py
   ```

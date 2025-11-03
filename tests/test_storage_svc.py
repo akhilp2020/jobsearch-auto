@@ -179,3 +179,62 @@ def test_get_profile_missing_returns_404(tmp_path: Path, monkeypatch: pytest.Mon
     with TestClient(app) as client:
         response = client.get("/profile")
         assert response.status_code == 404
+
+
+def test_clarify_flow_updates_profile_and_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOBSEARCH_HOME", str(tmp_path))
+    app = _load_app()
+    module = sys.modules["storage_svc.main"]
+    module.fs_client = InProcessFsClient()
+
+    with TestClient(app) as client:
+        clarify = client.post("/clarify")
+        assert clarify.status_code == 200
+        payload = clarify.json()
+        question_ids = {item["id"] for item in payload["questions"]}
+        expected_ids = {
+            "salary_target",
+            "relocation",
+            "visa",
+            "remote_percentage",
+            "industries",
+            "seniority",
+            "target_titles",
+        }
+        assert expected_ids.issubset(question_ids)
+        assert len(payload["questions"]) <= 20
+
+        answers = {
+            "answers": [
+                {"id": "salary_target", "answer": "$185,000"},
+                {"id": "relocation", "answer": "Yes, open to NYC or Austin"},
+                {"id": "visa", "answer": "No sponsorship needed"},
+                {"id": "remote_percentage", "answer": "80"},
+                {"id": "industries", "answer": "AI, Climate Tech"},
+                {"id": "seniority", "answer": "Staff level"},
+                {"id": "target_titles", "answer": "Staff ML Engineer; Head of AI"},
+            ]
+        }
+        response = client.post("/clarify/answers", json=answers)
+        assert response.status_code == 200
+        data = response.json()
+        profile = data["profile"]
+        preferences = profile["preferences"]
+        assert preferences["salary_target"] == 185000
+        assert preferences["remote_percentage"] == 80
+        assert "AI" in preferences["target_industries"]
+        assert "Staff ML Engineer" in preferences["target_titles"]
+        assert preferences["seniority"] == "Staff level"
+
+        canonical_file = tmp_path / "profile" / "canonical_profile.json"
+        assert canonical_file.exists()
+        stored = json.loads(canonical_file.read_text())
+        assert stored["preferences"]["remote_percentage"] == 80
+
+        history_file = tmp_path / "profile" / "profile_history.jsonl"
+        assert history_file.exists()
+        history_lines = [line for line in history_file.read_text().splitlines() if line.strip()]
+        assert len(history_lines) == 1
+        history_entry = json.loads(history_lines[0])
+        changed_paths = {change["path"] for change in history_entry["changes"]}
+        assert "preferences.salary_target" in changed_paths

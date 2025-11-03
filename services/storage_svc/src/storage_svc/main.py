@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
+import re
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -23,6 +26,61 @@ from .ingest import (
 
 ALLOWED_TOP_LEVEL = {"profile", "jobs", "logs", "exports"}
 CANONICAL_PROFILE_PATH = "profile/canonical_profile.json"
+PROFILE_HISTORY_PATH = "profile/profile_history.jsonl"
+MAX_CLARIFY_QUESTIONS = 20
+
+CLARIFY_QUESTION_SPECS = [
+    {
+        "id": "salary_target",
+        "topic": "compensation",
+        "question": "What annual base salary (USD) are you targeting for your next role?",
+        "suggested_format": "Example: 180000",
+        "path": ("preferences", "salary_target"),
+    },
+    {
+        "id": "relocation",
+        "topic": "location",
+        "question": "Are you open to relocating? If yes, list preferred cities or regions.",
+        "suggested_format": "Example: Yes, open to NYC or Seattle.",
+        "path": ("preferences", "relocation"),
+    },
+    {
+        "id": "visa",
+        "topic": "eligibility",
+        "question": "Do you require visa sponsorship now or in the near future?",
+        "suggested_format": "Example: No sponsorship needed (US citizen).",
+        "path": ("preferences", "visa"),
+    },
+    {
+        "id": "remote_percentage",
+        "topic": "work_style",
+        "question": "What percentage of your workweek do you want to be remote?",
+        "suggested_format": "Example: 80",
+        "path": ("preferences", "remote_percentage"),
+    },
+    {
+        "id": "industries",
+        "topic": "focus",
+        "question": "Which industries are you most interested in targeting?",
+        "suggested_format": "Example: AI, Fintech, Developer Tools",
+        "path": ("preferences", "target_industries"),
+    },
+    {
+        "id": "seniority",
+        "topic": "seniority",
+        "question": "What seniority level are you targeting (e.g., Senior IC, Staff, Manager)?",
+        "suggested_format": "Example: Staff Engineer or Engineering Manager",
+        "path": ("preferences", "seniority"),
+    },
+    {
+        "id": "target_titles",
+        "topic": "titles",
+        "question": "List the job titles you most want to pursue next.",
+        "suggested_format": "Example: Staff Software Engineer, Head of AI",
+        "path": ("preferences", "target_titles"),
+    },
+]
+CLARIFY_PATHS = {spec["id"]: tuple(spec["path"]) for spec in CLARIFY_QUESTION_SPECS}
 logger = logging.getLogger(__name__)
 
 
@@ -60,6 +118,31 @@ class CanonicalProfile(BaseModel):
 
 
 class IngestProfileResponse(BaseModel):
+    path: str
+    profile: CanonicalProfile
+
+
+class ClarifyQuestion(BaseModel):
+    id: str
+    topic: str
+    question: str
+    suggested_format: str | None = None
+
+
+class ClarifyResponse(BaseModel):
+    questions: list[ClarifyQuestion]
+
+
+class ClarifyAnswer(BaseModel):
+    id: str
+    answer: str
+
+
+class ClarifyAnswersRequest(BaseModel):
+    answers: list[ClarifyAnswer]
+
+
+class ClarifyAnswersResponse(BaseModel):
     path: str
     profile: CanonicalProfile
 
@@ -227,6 +310,201 @@ async def _read_canonical_profile() -> dict[str, Any]:
     return canonicalize_profile(data)
 
 
+async def _load_or_default_profile() -> dict[str, Any]:
+    try:
+        return await _read_canonical_profile()
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_404_NOT_FOUND:
+            return canonicalize_profile({})
+        raise
+
+
+def _value_present(profile: dict[str, Any], path: tuple[str, ...]) -> bool:
+    current: Any = profile
+    for key in path:
+        if not isinstance(current, dict):
+            return False
+        current = current.get(key)
+    if current is None:
+        return False
+    if isinstance(current, str):
+        return current.strip() != ""
+    if isinstance(current, (list, tuple, set)):
+        return len(current) > 0
+    return True
+
+
+def _generate_clarify_questions(profile: dict[str, Any]) -> list[ClarifyQuestion]:
+    questions: list[ClarifyQuestion] = []
+    for spec in CLARIFY_QUESTION_SPECS:
+        if len(questions) >= MAX_CLARIFY_QUESTIONS:
+            break
+        path = CLARIFY_PATHS[spec["id"]]
+        if _value_present(profile, path):
+            continue
+        questions.append(
+            ClarifyQuestion(
+                id=spec["id"],
+                topic=spec["topic"],
+                question=spec["question"],
+                suggested_format=spec.get("suggested_format"),
+            )
+        )
+    return questions
+
+
+def _coerce_yes_no(value: str) -> bool | None:
+    lowered = value.strip().lower()
+    positives = {"yes", "y", "true", "open", "willing", "sure"}
+    negatives = {"no", "n", "false", "nope", "not", "never"}
+    if lowered in positives:
+        return True
+    if lowered in negatives:
+        return False
+    return None
+
+
+def _split_to_list(value: str) -> list[str]:
+    tokens = [item.strip() for item in re.split(r"[,;/]", value) if item.strip()]
+    if not tokens and value.strip():
+        tokens = [value.strip()]
+    return tokens
+
+
+def _normalize_answer_value(answer_id: str, raw: str) -> Any:
+    text = raw.strip()
+    if not text:
+        return None
+
+    if answer_id == "salary_target":
+        digits = re.sub(r"[^\d]", "", text)
+        if digits:
+            return int(digits)
+        return text
+
+    if answer_id == "relocation":
+        coerced = _coerce_yes_no(text)
+        if coerced is not None:
+            return coerced
+        return text
+
+    if answer_id == "visa":
+        coerced = _coerce_yes_no(text)
+        if coerced is not None:
+            return coerced
+        return text
+
+    if answer_id == "remote_percentage":
+        match = re.search(r"\d+", text)
+        if match:
+            value = int(match.group())
+            return max(0, min(value, 100))
+        return text
+
+    if answer_id == "industries":
+        return _split_to_list(text)
+
+    if answer_id == "target_titles":
+        return _split_to_list(text)
+
+    if answer_id == "seniority":
+        return text
+
+    return text
+
+
+def _apply_clarify_answers(profile: dict[str, Any], answers: ClarifyAnswersRequest) -> dict[str, Any]:
+    updated = copy.deepcopy(profile)
+
+    def _set_nested_value(container: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
+        current = container
+        for key in path[:-1]:
+            next_value = current.get(key)
+            if not isinstance(next_value, dict):
+                next_value = {}
+            current[key] = next_value
+            current = next_value
+        current[path[-1]] = value
+
+    for answer in answers.answers:
+        path = CLARIFY_PATHS.get(answer.id)
+        if not path:
+            continue
+        normalized = _normalize_answer_value(answer.id, answer.answer)
+        if normalized is None:
+            continue
+
+        _set_nested_value(updated, path, normalized)
+
+    return canonicalize_profile(updated)
+
+
+def _diff_profiles(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+
+    def _walk(path: list[str], left: Any, right: Any) -> None:
+        if left == right:
+            return
+        if isinstance(left, dict) and isinstance(right, dict):
+            keys = set(left) | set(right)
+            for key in sorted(keys):
+                _walk(path + [key], left.get(key), right.get(key))
+            return
+        if isinstance(left, list) and isinstance(right, list):
+            if left != right:
+                changes.append(
+                    {"path": ".".join(path), "before": left, "after": right}
+                )
+            return
+        changes.append({"path": ".".join(path), "before": left, "after": right})
+
+    _walk([], before, after)
+    return changes
+
+
+async def _append_profile_history(changes: list[dict[str, Any]]) -> None:
+    if not changes:
+        return
+
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "changes": changes,
+        "source": "clarify_answers",
+    }
+
+    line = json.dumps(entry)
+
+    existing_content = ""
+    try:
+        payload = await fs_client.read(PROFILE_HISTORY_PATH)
+    except FileNotFoundError:
+        existing_content = ""
+    except MCPClientError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"MCP fs.read failed for history: {exc}",
+        ) from exc
+    else:
+        content = payload.get("content")
+        if isinstance(content, str):
+            existing_content = content
+
+    if existing_content:
+        if not existing_content.endswith("\n"):
+            existing_content = existing_content + "\n"
+        new_content = existing_content + line + "\n"
+    else:
+        new_content = line + "\n"
+
+    try:
+        await fs_client.write(PROFILE_HISTORY_PATH, new_content, "text")
+    except MCPClientError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"MCP fs.write failed for history: {exc}",
+        ) from exc
+
+
 @app.on_event("startup")
 async def startup() -> None:
     """Ensure directory scaffolding is present before serving traffic."""
@@ -269,6 +547,45 @@ async def write_file(payload: WriteRequest) -> WriteResponse:
         ) from exc
 
     return WriteResponse.model_validate(metadata)
+
+
+@app.post("/clarify", response_model=ClarifyResponse)
+async def clarify() -> ClarifyResponse:
+    """Return a list of targeted follow-up questions for candidate preferences."""
+    profile = await _load_or_default_profile()
+    questions = _generate_clarify_questions(profile)
+    return ClarifyResponse(questions=questions[:MAX_CLARIFY_QUESTIONS])
+
+
+@app.post("/clarify/answers", response_model=ClarifyAnswersResponse)
+async def clarify_answers(payload: ClarifyAnswersRequest) -> ClarifyAnswersResponse:
+    """Merge clarify answers into the canonical profile and log history."""
+    if not payload.answers:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one answer is required.",
+        )
+
+    current_profile = await _load_or_default_profile()
+    updated_profile = _apply_clarify_answers(current_profile, payload)
+
+    diffs = _diff_profiles(current_profile, updated_profile)
+    serialized = json.dumps(updated_profile, indent=2)
+
+    try:
+        await fs_client.write(CANONICAL_PROFILE_PATH, serialized, "text")
+    except MCPClientError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"MCP fs.write failed: {exc}",
+        ) from exc
+
+    await _append_profile_history(diffs)
+
+    return ClarifyAnswersResponse(
+        path=CANONICAL_PROFILE_PATH,
+        profile=CanonicalProfile.model_validate(updated_profile),
+    )
 
 
 @app.post("/ingest-cv", response_model=IngestProfileResponse)
