@@ -1,15 +1,29 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query, status
-from pydantic import BaseModel
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile, status
+from pydantic import BaseModel, Field
 
-from mcp_clients import FsClient, MCPClientError
+from llm_driver.driver import LLMDriver, load_driver_from_env
+from mcp_clients import DirectFsClient, MCPClientError
+
+from .ingest import (
+    canonicalize_profile,
+    extract_text_from_bytes,
+    merge_profiles,
+    parse_llm_json,
+    redact_pii,
+    rule_based_profile,
+)
 
 ALLOWED_TOP_LEVEL = {"profile", "jobs", "logs", "exports"}
+CANONICAL_PROFILE_PATH = "profile/canonical_profile.json"
+logger = logging.getLogger(__name__)
 
 
 class DirectoryEntry(BaseModel):
@@ -36,8 +50,23 @@ class WriteResponse(BaseModel):
     modified: float
 
 
+class CanonicalProfile(BaseModel):
+    contact: dict[str, Any] = Field(default_factory=dict)
+    roles: list[dict[str, Any]] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
+    education: list[str] = Field(default_factory=list)
+    achievements: list[str] = Field(default_factory=list)
+    preferences: dict[str, Any] = Field(default_factory=dict)
+
+
+class IngestProfileResponse(BaseModel):
+    path: str
+    profile: CanonicalProfile
+
+
 app = FastAPI(title="Storage Service")
-fs_client = FsClient()
+fs_client = DirectFsClient()
+_llm_driver: LLMDriver | None = None
 
 
 @app.get("/healthz")
@@ -122,6 +151,82 @@ def _normalize_path(raw: str, *, for_listing: bool) -> str:
     return "/".join(parts)
 
 
+def _get_llm_driver() -> LLMDriver:
+    global _llm_driver
+    if _llm_driver is None:
+        try:
+            _llm_driver = load_driver_from_env()
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="LLM provider not configured.",
+            ) from exc
+    return _llm_driver
+
+
+def _build_extraction_prompt(text: str) -> str:
+    truncated = text.strip()
+    if len(truncated) > 6000:
+        truncated = truncated[:6000]
+    schema_description = """
+You are a resume parser. Extract structured information from the resume text and return ONLY a valid JSON object.
+
+CRITICAL: Your response must be ONLY JSON. Do not include any explanatory text, markdown formatting, or commentary.
+
+Return a JSON object with exactly these keys:
+{
+  "contact": {"name": "string", "email": "string", "phone": "string"},
+  "roles": [{"title": "string", "company": "string", "start": "string", "end": "string"}],
+  "skills": ["string"],
+  "education": ["string"],
+  "achievements": ["string"],
+  "preferences": {"location": "string", "remote": "yes|partial|no", "visa": "boolean or string"}
+}
+
+Rules:
+- All fields are optional - use empty object/array if not found
+- Do not invent information not present in the resume
+- Keep skills concise (2-5 words each)
+- Include achievements that mention metrics or measurable impact
+- Return ONLY the JSON object, nothing else
+
+Resume text:
+"""
+    prompt = f"{schema_description.strip()}\n\n{truncated}"
+    return prompt
+
+
+async def _read_canonical_profile() -> dict[str, Any]:
+    try:
+        payload = await fs_client.read(CANONICAL_PROFILE_PATH)
+    except (MCPClientError, FileNotFoundError) as exc:
+        message = str(exc)
+        if "does not exist" in message.lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Canonical profile not found.",
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"MCP fs.read failed: {exc}",
+        ) from exc
+
+    content = payload.get("content")
+    if not isinstance(content, str):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Profile file missing text content.",
+        )
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Stored canonical profile contains invalid JSON.",
+        ) from exc
+    return canonicalize_profile(data)
+
+
 @app.on_event("startup")
 async def startup() -> None:
     """Ensure directory scaffolding is present before serving traffic."""
@@ -164,6 +269,60 @@ async def write_file(payload: WriteRequest) -> WriteResponse:
         ) from exc
 
     return WriteResponse.model_validate(metadata)
+
+
+@app.post("/ingest-cv", response_model=IngestProfileResponse)
+async def ingest_cv(file: UploadFile = File(...)) -> IngestProfileResponse:
+    """Ingest a CV document, extract structured data, and persist canonical profile JSON."""
+    filename = file.filename or "upload"
+    data = await file.read()
+    text = extract_text_from_bytes(filename, file.content_type, data)
+
+    rule_profile = rule_based_profile(text)
+    llm_profile: dict[str, Any] = {}
+    try:
+        driver = _get_llm_driver()
+        prompt = _build_extraction_prompt(text)
+        llm_response = driver.complete(prompt, json_mode=True)
+        llm_profile = parse_llm_json(llm_response)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        logger.warning("LLM returned invalid JSON: %s", redact_pii(str(exc)))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("LLM extraction failed: %s", redact_pii(str(exc)))
+
+    combined = merge_profiles(rule_profile, llm_profile)
+    canonical = canonicalize_profile(combined)
+    serialized = json.dumps(canonical, indent=2)
+
+    try:
+        await fs_client.write(CANONICAL_PROFILE_PATH, serialized, "text")
+    except MCPClientError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"MCP fs.write failed: {exc}",
+        ) from exc
+
+    contact_summary = redact_pii(json.dumps(canonical.get("contact", {})))
+    logger.info(
+        "CV ingestion complete; contact=%s roles=%d skills=%d",
+        contact_summary,
+        len(canonical.get("roles", [])),
+        len(canonical.get("skills", [])),
+    )
+
+    return IngestProfileResponse(
+        path=CANONICAL_PROFILE_PATH,
+        profile=CanonicalProfile.model_validate(canonical),
+    )
+
+
+@app.get("/profile", response_model=CanonicalProfile)
+async def get_profile() -> CanonicalProfile:
+    """Return the canonical profile JSON."""
+    canonical = await _read_canonical_profile()
+    return CanonicalProfile.model_validate(canonical)
 
 
 if __name__ == "__main__":

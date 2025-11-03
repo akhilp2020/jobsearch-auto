@@ -1,8 +1,6 @@
 """Module entrypoint for mcp_fs."""
 
-import anyio
-
-from .server import main
+from .server_v2 import mcp
 
 if __name__ == "__main__":
-    anyio.run(main)
+    mcp.run(transport="stdio")

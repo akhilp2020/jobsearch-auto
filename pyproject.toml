@@ -30,6 +30,7 @@ members = [
 
 [tool.uv.sources]
 "mcp-clients" = { workspace = true }
+"llm-driver" = { workspace = true }
 
 [tool.black]
 line-length = 88

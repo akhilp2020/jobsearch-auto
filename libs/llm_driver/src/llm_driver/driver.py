@@ -19,8 +19,13 @@ class LLMDriver(ABC):
         self.model = model
 
     @abstractmethod
-    def complete(self, prompt: str) -> str:
-        """Synchronously obtain a completion for *prompt*."""
+    def complete(self, prompt: str, *, json_mode: bool = False) -> str:
+        """Synchronously obtain a completion for *prompt*.
+
+        Args:
+            prompt: The prompt to complete.
+            json_mode: If True, enforce JSON-only output (when supported by provider).
+        """
 
     def embed(self, text: str) -> list[float]:  # pragma: no cover - optional
         """Return an embedding vector if the provider supports it."""
@@ -42,7 +47,7 @@ class OpenAICompletionDriver(LLMDriver):
     def _use_responses_api(self) -> bool:
         return self.model.lower().startswith("gpt-5")
 
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, *, json_mode: bool = False) -> str:
         headers = {"Authorization": f"Bearer {self._api_key}"}
 
         if self._use_responses_api():
@@ -54,11 +59,16 @@ class OpenAICompletionDriver(LLMDriver):
             data = response.json()
             return self._parse_responses_payload(data)
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
         }
+
+        # Enable JSON mode for gpt-4o-mini and newer models
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+
         response = self._post(
             self._CHAT_API_URL, headers=headers, json=payload, timeout=30
         )
@@ -106,12 +116,13 @@ class AnthropicCompletionDriver(LLMDriver):
         self._api_key = api_key
         self._post = post or httpx.post
 
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, *, json_mode: bool = False) -> str:
         payload = {
             "model": self.model,
             "max_tokens": 512,
             "messages": [{"role": "user", "content": prompt}],
         }
+        # Anthropic doesn't support forced JSON mode, json_mode is ignored
         headers = {
             "x-api-key": self._api_key,
             "anthropic-version": self._API_VERSION,
@@ -149,8 +160,11 @@ class OllamaCompletionDriver(LLMDriver):
             self._url = normalized + "/api/generate"
         self._post = post or httpx.post
 
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, *, json_mode: bool = False) -> str:
         payload = {"model": self.model, "prompt": prompt, "stream": False}
+        # Ollama supports JSON format parameter
+        if json_mode:
+            payload["format"] = "json"
         response = self._post(self._url, json=payload, timeout=30)
         response.raise_for_status()
         data = response.json()

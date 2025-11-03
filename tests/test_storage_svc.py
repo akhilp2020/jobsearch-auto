@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 from pathlib import Path
 
@@ -11,8 +12,9 @@ from mcp_fs.server import invoke_tool
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SERVICE_SRC = PROJECT_ROOT / "services" / "storage_svc" / "src"
 LIB_SRC = PROJECT_ROOT / "libs" / "mcp_clients" / "src"
+LLM_SRC = PROJECT_ROOT / "libs" / "llm_driver" / "src"
 
-for path in [str(LIB_SRC), str(SERVICE_SRC)]:
+for path in [str(LIB_SRC), str(SERVICE_SRC), str(LLM_SRC)]:
     if path not in sys.path:
         sys.path.insert(0, path)
 
@@ -30,6 +32,10 @@ class InProcessFsClient:
     async def write(self, path: str, content: str, kind: str = "text") -> dict[str, object]:
         payload = {"path": path, "content": content, "kind": kind}
         _, structured = await invoke_tool("fs.write", payload)
+        return structured
+
+    async def read(self, path: str) -> dict[str, object]:
+        _, structured = await invoke_tool("fs.read", {"path": path})
         return structured
 
 
@@ -101,3 +107,75 @@ def test_invalid_paths_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
         invalid_job_folder = _write(client, path="jobs/acme_notes/job.txt", content="oops")
         assert invalid_job_folder.status_code == 400
+
+
+class StubLLMDriver:
+    def __init__(self) -> None:
+        self.last_prompt: str | None = None
+
+    def complete(self, prompt: str, *, json_mode: bool = False) -> str:
+        self.last_prompt = prompt
+        payload = {
+            "contact": {"name": "Alex Candidate", "email": "alex@example.com"},
+            "roles": [
+                {
+                    "title": "Senior Engineer",
+                    "company": "Example Corp",
+                    "start": "2020",
+                    "end": "2024",
+                }
+            ],
+            "skills": ["Python", "FastAPI"],
+            "achievements": ["Improved conversion by 35%"],
+            "preferences": {"location": "New York", "remote": "hybrid"},
+        }
+        return json.dumps(payload)
+
+
+def test_ingest_cv_and_get_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOBSEARCH_HOME", str(tmp_path))
+
+    app = _load_app()
+    module = sys.modules["storage_svc.main"]
+    module.fs_client = InProcessFsClient()
+    module._llm_driver = StubLLMDriver()
+    module.extract_text_from_bytes = lambda *args, **kwargs: (
+        "Alex Candidate\nalex@example.com\n+1 (555) 123-4567\n"
+        "Experience\nSenior Engineer - Example Corp (2020 - 2024)\n"
+        "Skills: Python; FastAPI; Docker\n"
+        "Education\nState University, B.S. Computer Science\n"
+        "Achievements\nReduced cost by 15% in cloud migration.\n"
+        "Preferences\nBased in New York, open to hybrid roles. Requires no visa sponsorship."
+    )
+
+    with TestClient(app) as client:
+        files = {"file": ("resume.pdf", b"%PDF-1.4 mock content", "application/pdf")}
+        response = client.post("/ingest-cv", files=files)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["path"] == "profile/canonical_profile.json"
+        profile = payload["profile"]
+        assert profile["contact"]["email"] == "alex@example.com"
+        assert profile["contact"]["phone"].startswith("+1")
+        assert profile["roles"][0]["company"] == "Example Corp"
+        assert "Python" in profile["skills"]
+        assert profile["preferences"]["remote"] == "hybrid"
+
+        canonical_file = tmp_path / "profile" / "canonical_profile.json"
+        assert canonical_file.exists()
+        stored = json.loads(canonical_file.read_text())
+        assert stored["contact"]["email"] == "alex@example.com"
+
+        get_profile = client.get("/profile")
+        assert get_profile.status_code == 200
+        fetched = get_profile.json()
+        assert fetched["roles"][0]["title"] == "Senior Engineer"
+
+
+def test_get_profile_missing_returns_404(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOBSEARCH_HOME", str(tmp_path))
+    app = _load_app()
+
+    with TestClient(app) as client:
+        response = client.get("/profile")
+        assert response.status_code == 404

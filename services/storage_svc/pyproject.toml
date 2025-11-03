@@ -3,7 +3,16 @@ name = "storage-svc"
 version = "0.1.0"
 description = "Storage service"
 requires-python = ">=3.11"
-dependencies = ["fastapi>=0.111.0", "uvicorn[standard]>=0.29.0", "mcp-clients>=0.1.0"]
+dependencies = [
+  "fastapi>=0.111.0",
+  "uvicorn[standard]>=0.29.0",
+  "mcp-clients>=0.1.0",
+  "llm-driver>=0.1.0",
+  "textract>=1.6.5",
+  "pypdf>=5.0.0",
+  "docx2txt>=0.8",
+  "python-multipart>=0.0.9",
+]
 
 [project.optional-dependencies]
 dev = ["pytest"]

@@ -98,10 +98,9 @@ async def list_tools() -> list[types.Tool]:
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Path relative to JOBSEARCH_HOME. Absolute paths must reside within it.",
+                "description": "Path relative to JOBSEARCH_HOME. Absolute paths must reside within it. Defaults to JOBSEARCH_HOME root if not provided.",
             }
         },
-        "required": ["path"],
         "additionalProperties": False,
     }
 
@@ -203,8 +202,15 @@ async def invoke_tool(name: str, arguments: dict[str, Any]) -> tuple[list[types.
 
 
 async def main() -> None:
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+    import sys
+    print("MCP FS Server starting...", file=sys.stderr, flush=True)
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            print("stdio_server context entered, starting server.run...", file=sys.stderr, flush=True)
+            await server.run(read_stream, write_stream, server.create_initialization_options())
+    except Exception as e:
+        print(f"Server error: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        raise
 
 
 if __name__ == "__main__":
