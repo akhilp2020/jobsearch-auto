@@ -1,0 +1,16 @@
+[project]
+name = "mcp-pdf"
+version = "0.1.0"
+description = "PDF rendering MCP server"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=1.20.0",
+  "fpdf2>=2.7",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"

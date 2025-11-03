@@ -16,15 +16,16 @@ dev-dependencies = [
   "black==24.4.2",
   "ruff==0.4.8",
   "pytest==8.3.2",
-  "httpx==0.27.0",
+  "httpx==0.28.1",
   "fastapi==0.111.0",
-  "uvicorn[standard]==0.29.0"
+  "uvicorn[standard]==0.38.0"
 ]
 
 [tool.uv.workspace]
 members = [
   "services/*",
-  "libs/*"
+  "libs/*",
+  "mcp/*"
 ]
 
 [tool.black]
@@ -55,4 +56,3 @@ exclude = [
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
-

@@ -1,0 +1,16 @@
+[project]
+name = "mcp-comm"
+version = "0.1.0"
+description = "Communications MCP server"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=1.20.0",
+  "httpx>=0.28",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# MCP Tools Wrapper Script
+# Usage: ./mcp-cli <server> <tool> '<json_arguments>'
+
+# Set required environment variables
+export PYTHONPATH="mcp/mcp_fs/src:mcp/mcp_pdf/src:mcp/mcp_comm/src"
+export JOBSEARCH_HOME="${JOBSEARCH_HOME:-$HOME/JobSearch}"
+
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Execute the MCP call tool
+exec "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/tools/mcp_call_fixed.py" "$@"
