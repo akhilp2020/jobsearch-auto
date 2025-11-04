@@ -1,6 +1,16 @@
 from __future__ import annotations
 
+from enum import Enum
+
 from pydantic import BaseModel, Field
+
+
+class ApplicationStatus(str, Enum):
+    """Application status for a job."""
+
+    PENDING_REVIEW = "PENDING_REVIEW"
+    READY_TO_APPLY = "READY_TO_APPLY"
+    REJECTED = "REJECTED"
 
 
 class PrepareRequest(BaseModel):
@@ -43,6 +53,10 @@ class JobPreparation(BaseModel):
     supplemental_pdf_path: str = Field(default="", description="Path to supplemental PDF")
     validation_passed: bool = Field(default=False, description="Whether validation passed")
     validation_violations: int = Field(default=0, description="Number of validation violations")
+    status: ApplicationStatus = Field(
+        default=ApplicationStatus.PENDING_REVIEW, description="Application status"
+    )
+    rejection_reason: str = Field(default="", description="Reason for rejection if status is REJECTED")
 
 
 class PrepareResponse(BaseModel):
@@ -52,3 +66,57 @@ class PrepareResponse(BaseModel):
     jobs_prepared: int = Field(..., description="Number of jobs prepared")
     jobs: list[JobPreparation] = Field(..., description="List of prepared jobs with details")
     total_violations: int = Field(default=0, description="Total validation violations across all jobs")
+
+
+class ApproveRequest(BaseModel):
+    """Request to approve a job application."""
+
+    job_id: str = Field(..., description="Job ID to approve")
+
+
+class RejectRequest(BaseModel):
+    """Request to reject a job application."""
+
+    job_id: str = Field(..., description="Job ID to reject")
+    reason: str = Field(..., description="Reason for rejection")
+
+
+class ReviewResponse(BaseModel):
+    """Response containing review dashboard data."""
+
+    jobs_prepared: int = Field(..., description="Number of jobs prepared")
+    total_violations: int = Field(default=0, description="Total validation violations")
+    jobs: list[JobPreparation] = Field(..., description="List of jobs with status")
+
+
+class ApplyRequest(BaseModel):
+    """Request to apply to a job."""
+
+    job_id: str = Field(..., description="Job ID to apply to")
+
+
+class RequiredField(BaseModel):
+    """Field that requires user input."""
+
+    selector: str = Field(..., description="CSS selector for the field")
+    field_type: str = Field(..., description="Type of field (text, select, file, etc)")
+    label: str = Field(default="", description="Field label if available")
+    suggested_value: str = Field(default="", description="Suggested value if inferable")
+
+
+class ApplyResponse(BaseModel):
+    """Response from job application."""
+
+    job_id: str = Field(..., description="Job ID")
+    status: str = Field(
+        ...,
+        description="Application status: SUCCESS, NEEDS_INPUT, FAILED",
+    )
+    method: str = Field(default="", description="Application method used: API or BROWSER")
+    confirmation_id: str = Field(default="", description="Confirmation ID if successful")
+    evidence_path: str = Field(default="", description="Path to evidence.json")
+    screenshots: list[str] = Field(default_factory=list, description="Paths to screenshots")
+    required_fields: list[RequiredField] = Field(
+        default_factory=list, description="Fields requiring input (if NEEDS_INPUT)"
+    )
+    error_message: str = Field(default="", description="Error message if failed")
