@@ -9,6 +9,7 @@ members = [
     "cv-builder-svc",
     "doc-builder-svc",
     "job-finder-svc",
+    "job-ranker-svc",
     "jobsearch-auto",
     "llm-driver",
     "mcp-clients",
@@ -677,6 +678,32 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.111.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "lxml", specifier = ">=4.9.0" },
+    { name = "pytest", marker = "extra == 'dev'" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.29.0" },
+]
+provides-extras = ["dev"]
+
+[[package]]
+name = "job-ranker-svc"
+version = "0.1.0"
+source = { editable = "services/job_ranker_svc" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.111.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29.0" },
 ]

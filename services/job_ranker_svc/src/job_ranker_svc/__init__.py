@@ -1,0 +1,1 @@
+"""Job ranking service."""
