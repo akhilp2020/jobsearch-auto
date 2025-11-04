@@ -62,6 +62,11 @@ def _doc_builder_url() -> str:
     return _service_url("DOC_BUILDER_SERVICE", "9003")
 
 
+def _notify_service_url() -> str:
+    """Get notify service URL."""
+    return _service_url("NOTIFY_SERVICE", "8001")
+
+
 def _jobsearch_home() -> Path:
     """Get JOBSEARCH_HOME directory."""
     home = os.getenv("JOBSEARCH_HOME", str(Path.home() / "JobSearch"))
@@ -1024,6 +1029,91 @@ async def apply_to_job(request: ApplyRequest) -> ApplyResponse:
         )
 
 
+async def _send_application_notification(
+    job_data: dict,
+    confirmation_id: str,
+    evidence_path: str,
+) -> None:
+    """Send notification after successful application.
+
+    Args:
+        job_data: Job data from dashboard
+        confirmation_id: Application confirmation ID
+        evidence_path: Path to evidence file
+    """
+    try:
+        # Get notification settings from environment
+        channel = os.getenv("NOTIFICATION_CHANNEL", "email")
+        recipient = os.getenv("NOTIFICATION_RECIPIENT", "")
+
+        # If no recipient configured, try to get from profile
+        if not recipient:
+            try:
+                profile = await _load_profile()
+                recipient = profile.get("contact", {}).get("email", "")
+            except Exception as exc:
+                logger.warning(f"Could not load profile for notification: {exc}")
+
+        if not recipient:
+            logger.warning("No notification recipient configured, skipping notification")
+            return
+
+        # Build notification message
+        job_title = job_data.get("job_title", "Unknown")
+        company = job_data.get("company", "Unknown")
+
+        message = f"""Application submitted successfully!
+
+Job: {job_title}
+Company: {company}
+Confirmation: {confirmation_id}
+
+Your application materials have been submitted."""
+
+        # Build links to application materials
+        links = []
+        jobsearch_home = _jobsearch_home()
+
+        if job_data.get("cv_pdf_path"):
+            try:
+                rel_path = Path(job_data["cv_pdf_path"]).relative_to(jobsearch_home)
+                # Use localhost for local development; in production would use actual domain
+                cv_url = f"http://localhost:9004/files/{rel_path}"
+                links.append({"label": "CV", "url": cv_url})
+            except Exception:
+                pass
+
+        if job_data.get("cover_letter_pdf_path"):
+            try:
+                rel_path = Path(job_data["cover_letter_pdf_path"]).relative_to(jobsearch_home)
+                cover_url = f"http://localhost:9004/files/{rel_path}"
+                links.append({"label": "Cover Letter", "url": cover_url})
+            except Exception:
+                pass
+
+        # Send notification
+        notify_url = _notify_service_url()
+        payload = {
+            "channel": channel,
+            "to": recipient,
+            "message": message,
+            "subject": f"Application Submitted: {job_title} at {company}",
+            "links": links,
+        }
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(f"{notify_url}/notify", json=payload)
+
+            if response.status_code == 200:
+                logger.info(f"Notification sent to {recipient} via {channel}")
+            else:
+                logger.warning(f"Notification failed: {response.status_code} - {response.text}")
+
+    except Exception as exc:
+        # Don't fail the application if notification fails
+        logger.error(f"Error sending notification: {exc}")
+
+
 async def _apply_via_api(
     source: str,
     apply_url: str,
@@ -1380,6 +1470,13 @@ async def _apply_via_browser(
             evidence_path.write_text(json.dumps(evidence_data, indent=2))
 
             await browser.close()
+
+            # Send notification after successful application
+            await _send_application_notification(
+                job_data=job_data,
+                confirmation_id=confirmation_id,
+                evidence_path=str(evidence_path),
+            )
 
             return ApplyResponse(
                 job_id=job_id,
