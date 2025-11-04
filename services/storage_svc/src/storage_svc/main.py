@@ -365,7 +365,9 @@ def _coerce_yes_no(value: str) -> bool | None:
 
 
 def _split_to_list(value: str) -> list[str]:
-    tokens = [item.strip() for item in re.split(r"[,;/]", value) if item.strip()]
+    # Split on comma and semicolon, but preserve "/" in compound terms like "AI/ML"
+    # unless it's clearly a separator (has spaces around it)
+    tokens = [item.strip() for item in re.split(r"[,;]|\s+/\s+", value) if item.strip()]
     if not tokens and value.strip():
         tokens = [value.strip()]
     return tokens
@@ -377,6 +379,16 @@ def _normalize_answer_value(answer_id: str, raw: str) -> Any:
         return None
 
     if answer_id == "salary_target":
+        # Handle "k" suffix (e.g., "185k" or "185K")
+        lowered = text.lower()
+        if "k" in lowered:
+            digits = re.sub(r"[^\d.]", "", lowered.split("k")[0])
+            if digits:
+                try:
+                    return int(float(digits) * 1000)
+                except ValueError:
+                    pass
+        # Standard numeric extraction
         digits = re.sub(r"[^\d]", "", text)
         if digits:
             return int(digits)
@@ -462,14 +474,15 @@ def _diff_profiles(before: dict[str, Any], after: dict[str, Any]) -> list[dict[s
     return changes
 
 
-async def _append_profile_history(changes: list[dict[str, Any]]) -> None:
+async def _append_profile_history(changes: list[dict[str, Any]], source: str = "clarify_answers") -> None:
     if not changes:
         return
 
     entry = {
+        "version": 1,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": source,
         "changes": changes,
-        "source": "clarify_answers",
     }
 
     line = json.dumps(entry)

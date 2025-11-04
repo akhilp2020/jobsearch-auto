@@ -236,5 +236,74 @@ def test_clarify_flow_updates_profile_and_history(tmp_path: Path, monkeypatch: p
         history_lines = [line for line in history_file.read_text().splitlines() if line.strip()]
         assert len(history_lines) == 1
         history_entry = json.loads(history_lines[0])
+        assert history_entry["version"] == 1
+        assert history_entry["source"] == "clarify_answers"
+        assert "timestamp" in history_entry
         changed_paths = {change["path"] for change in history_entry["changes"]}
         assert "preferences.salary_target" in changed_paths
+
+
+def test_clarify_answer_normalization_edge_cases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test edge cases in answer normalization: k suffix, compound terms with slashes."""
+    monkeypatch.setenv("JOBSEARCH_HOME", str(tmp_path))
+    app = _load_app()
+    module = sys.modules["storage_svc.main"]
+    module.fs_client = InProcessFsClient()
+
+    with TestClient(app) as client:
+        # Test salary with "k" suffix
+        answers = {
+            "answers": [
+                {"id": "salary_target", "answer": "185k"},
+                {"id": "industries", "answer": "AI/ML, Fintech / Healthcare"},
+                {"id": "remote_percentage", "answer": "mixed: 75% remote"},
+            ]
+        }
+        response = client.post("/clarify/answers", json=answers)
+        assert response.status_code == 200
+        data = response.json()
+        preferences = data["profile"]["preferences"]
+
+        # Should parse "185k" as 185000
+        assert preferences["salary_target"] == 185000
+
+        # Should preserve "AI/ML" as single term but split on " / "
+        industries = preferences["target_industries"]
+        assert "AI/ML" in industries
+        assert "Fintech" in industries
+        assert "Healthcare" in industries
+
+        # Should extract 75 from mixed text
+        assert preferences["remote_percentage"] == 75
+
+
+def test_clarify_multiple_updates_append_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that multiple clarify/answers calls append to history file."""
+    monkeypatch.setenv("JOBSEARCH_HOME", str(tmp_path))
+    app = _load_app()
+    module = sys.modules["storage_svc.main"]
+    module.fs_client = InProcessFsClient()
+
+    with TestClient(app) as client:
+        # First update
+        first_answers = {"answers": [{"id": "salary_target", "answer": "200k"}]}
+        response1 = client.post("/clarify/answers", json=first_answers)
+        assert response1.status_code == 200
+
+        # Second update
+        second_answers = {"answers": [{"id": "remote_percentage", "answer": "100"}]}
+        response2 = client.post("/clarify/answers", json=second_answers)
+        assert response2.status_code == 200
+
+        # Check history has two entries
+        history_file = tmp_path / "profile" / "profile_history.jsonl"
+        assert history_file.exists()
+        history_lines = [line for line in history_file.read_text().splitlines() if line.strip()]
+        assert len(history_lines) == 2
+
+        # Verify both entries have version and timestamp
+        entry1 = json.loads(history_lines[0])
+        entry2 = json.loads(history_lines[1])
+        assert entry1["version"] == 1
+        assert entry2["version"] == 1
+        assert entry1["timestamp"] < entry2["timestamp"]
