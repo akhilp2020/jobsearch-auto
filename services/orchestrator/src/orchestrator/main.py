@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -11,6 +12,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from .audit_helper import create_artifact_record, create_audit_run, log_audit_entry
 from .models import (
     ApplicationStatus,
     ApplyRequest,
@@ -208,6 +210,10 @@ async def prepare_applications(request: PrepareRequest) -> PrepareResponse:
         PrepareResponse with dashboard path and job details
     """
     logger.info(f"Starting preparation for titles: {request.titles}, locations: {request.locations}")
+
+    # Create audit run
+    prepare_start = datetime.now().isoformat()
+    audit_run_id = await create_audit_run(trigger="USER", job_ids=[])
 
     # Step 1: Load profile
     profile = await _load_profile()
@@ -467,6 +473,26 @@ async def prepare_applications(request: PrepareRequest) -> PrepareResponse:
         dashboard_path = jobsearch_home / "review_dashboard.json"
         dashboard_path.write_text(json.dumps(dashboard_data, indent=2))
         logger.info(f"Dashboard saved to {dashboard_path}")
+
+        # Log audit entry for prepare operation
+        artifacts = []
+        for job_prep in prepared_jobs:
+            if job_prep.cv_pdf_path:
+                artifacts.append(create_artifact_record(job_prep.cv_pdf_path, "cv"))
+            if job_prep.cover_letter_pdf_path:
+                artifacts.append(create_artifact_record(job_prep.cover_letter_pdf_path, "cover_letter"))
+            if job_prep.supplemental_pdf_path:
+                artifacts.append(create_artifact_record(job_prep.supplemental_pdf_path, "supplemental"))
+
+        await log_audit_entry(
+            run_id=audit_run_id,
+            operation="PREPARE",
+            timestamp_start=prepare_start,
+            timestamp_end=datetime.now().isoformat(),
+            status="SUCCESS",
+            artifacts=artifacts,
+            metadata={"jobs_prepared": len(prepared_jobs), "total_violations": total_violations},
+        )
 
         return PrepareResponse(
             dashboard_path=str(dashboard_path),
@@ -929,10 +955,12 @@ async def apply_to_job(request: ApplyRequest) -> ApplyResponse:
     Returns:
         ApplyResponse with status and evidence
     """
-    from datetime import datetime
-
     job_id = request.job_id
     logger.info(f"Starting application for job {job_id}")
+
+    # Create audit run for apply
+    apply_start = datetime.now().isoformat()
+    audit_run_id = await create_audit_run(trigger="USER", job_ids=[job_id])
 
     # Load dashboard to get job details
     dashboard_data = _load_dashboard()
@@ -991,7 +1019,7 @@ async def apply_to_job(request: ApplyRequest) -> ApplyResponse:
     # Try API-based application first for supported sources
     if source in ["greenhouse", "lever"]:
         try:
-            result = await _apply_via_api(
+            result = await _apply_via_api_with_audit(
                 source=source,
                 apply_url=apply_url,
                 job_id=job_id,
@@ -1001,6 +1029,8 @@ async def apply_to_job(request: ApplyRequest) -> ApplyResponse:
                 job_folder=job_folder,
                 job_data=job_data,
                 timestamp=timestamp,
+                audit_run_id=audit_run_id,
+                apply_start=apply_start,
             )
             return result
         except Exception as exc:
@@ -1008,7 +1038,7 @@ async def apply_to_job(request: ApplyRequest) -> ApplyResponse:
 
     # Fallback to browser automation
     try:
-        result = await _apply_via_browser(
+        result = await _apply_via_browser_with_audit(
             apply_url=apply_url,
             job_id=job_id,
             full_name=full_name,
@@ -1017,10 +1047,24 @@ async def apply_to_job(request: ApplyRequest) -> ApplyResponse:
             job_folder=job_folder,
             job_data=job_data,
             timestamp=timestamp,
+            audit_run_id=audit_run_id,
+            apply_start=apply_start,
         )
         return result
     except Exception as exc:
         logger.error(f"Browser automation failed: {exc}")
+
+        # Log failed audit entry
+        await log_audit_entry(
+            run_id=audit_run_id,
+            operation="APPLY",
+            timestamp_start=apply_start,
+            timestamp_end=datetime.now().isoformat(),
+            status="FAILED",
+            error_message=str(exc),
+            metadata={"job_id": job_id},
+        )
+
         return ApplyResponse(
             job_id=job_id,
             status="FAILED",
@@ -1163,6 +1207,467 @@ async def _apply_via_api(
 
 
 async def _apply_via_browser(
+    apply_url: str,
+    job_id: str,
+    full_name: str,
+    email: str,
+    phone: str,
+    job_folder: Path,
+    job_data: dict,
+    timestamp: str,
+) -> ApplyResponse:
+    """Apply via browser automation using Playwright.
+
+    Args:
+        apply_url: Application URL
+        job_id: Job ID
+        full_name: Applicant full name
+        email: Applicant email
+        phone: Applicant phone
+        job_folder: Path to job folder
+        job_data: Job data from dashboard
+        timestamp: Timestamp for file naming
+
+    Returns:
+        ApplyResponse with results
+    """
+    from playwright.async_api import TimeoutError as PlaywrightTimeout
+    from playwright.async_api import async_playwright
+
+    logger.info(f"Starting browser automation for {apply_url}")
+
+    screenshots = []
+    required_fields = []
+    confirmation_id = ""
+    evidence_data = {
+        "job_id": job_id,
+        "apply_url": apply_url,
+        "timestamp": timestamp,
+        "steps": [],
+    }
+
+    try:
+        async with async_playwright() as p:
+            # Launch browser
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+
+            # Step 1: Navigate to application page
+            logger.info(f"Navigating to {apply_url}")
+            await page.goto(apply_url, wait_until="networkidle", timeout=30000)
+
+            screenshot_path = job_folder / f"apply_step1_load_{timestamp}.png"
+            await page.screenshot(path=screenshot_path)
+            screenshots.append(str(screenshot_path))
+            evidence_data["steps"].append({"step": 1, "action": "navigate", "url": apply_url})
+
+            # Step 2: Detect CAPTCHA
+            captcha_selectors = [
+                "iframe[src*='recaptcha']",
+                "iframe[src*='hcaptcha']",
+                ".g-recaptcha",
+                "#recaptcha",
+                "[data-callback='captcha']",
+            ]
+
+            for selector in captcha_selectors:
+                if await page.query_selector(selector):
+                    logger.warning("CAPTCHA detected")
+                    evidence_data["steps"].append({"step": 2, "action": "captcha_detected"})
+
+                    screenshot_path = job_folder / f"apply_captcha_{timestamp}.png"
+                    await page.screenshot(path=screenshot_path)
+                    screenshots.append(str(screenshot_path))
+
+                    await browser.close()
+                    return ApplyResponse(
+                        job_id=job_id,
+                        status="NEEDS_INPUT",
+                        method="BROWSER",
+                        screenshots=screenshots,
+                        required_fields=[
+                            RequiredField(
+                                selector=selector,
+                                field_type="captcha",
+                                label="CAPTCHA verification required",
+                            )
+                        ],
+                        evidence_path=str(job_folder / f"evidence_{timestamp}.json"),
+                    )
+
+            # Step 3: Fill common form fields
+            field_mappings = {
+                "name": [
+                    'input[name*="name"]',
+                    'input[placeholder*="name"]',
+                    'input[id*="name"]',
+                    'input[type="text"][name*="first"]',
+                ],
+                "email": [
+                    'input[type="email"]',
+                    'input[name*="email"]',
+                    'input[placeholder*="email"]',
+                ],
+                "phone": [
+                    'input[type="tel"]',
+                    'input[name*="phone"]',
+                    'input[placeholder*="phone"]',
+                ],
+            }
+
+            filled_fields = {}
+
+            # Try to fill name
+            for selector in field_mappings["name"]:
+                try:
+                    element = await page.query_selector(selector)
+                    if element:
+                        await element.fill(full_name)
+                        filled_fields["name"] = selector
+                        logger.info(f"Filled name field: {selector}")
+                        break
+                except Exception as exc:
+                    logger.debug(f"Could not fill {selector}: {exc}")
+
+            # Try to fill email
+            for selector in field_mappings["email"]:
+                try:
+                    element = await page.query_selector(selector)
+                    if element:
+                        await element.fill(email)
+                        filled_fields["email"] = selector
+                        logger.info(f"Filled email field: {selector}")
+                        break
+                except Exception as exc:
+                    logger.debug(f"Could not fill {selector}: {exc}")
+
+            # Try to fill phone
+            for selector in field_mappings["phone"]:
+                try:
+                    element = await page.query_selector(selector)
+                    if element:
+                        await element.fill(phone)
+                        filled_fields["phone"] = selector
+                        logger.info(f"Filled phone field: {selector}")
+                        break
+                except Exception as exc:
+                    logger.debug(f"Could not fill {selector}: {exc}")
+
+            evidence_data["steps"].append({"step": 3, "action": "fill_fields", "fields": filled_fields})
+
+            screenshot_path = job_folder / f"apply_step3_filled_{timestamp}.png"
+            await page.screenshot(path=screenshot_path)
+            screenshots.append(str(screenshot_path))
+
+            # Step 4: Upload CV and cover letter
+            cv_path = job_data.get("cv_pdf_path", "")
+            cover_path = job_data.get("cover_letter_pdf_path", "")
+
+            upload_selectors = [
+                'input[type="file"][name*="resume"]',
+                'input[type="file"][name*="cv"]',
+                'input[type="file"]',
+            ]
+
+            if cv_path and Path(cv_path).exists():
+                for selector in upload_selectors:
+                    try:
+                        element = await page.query_selector(selector)
+                        if element:
+                            await element.set_input_files(cv_path)
+                            logger.info(f"Uploaded CV to {selector}")
+                            evidence_data["steps"].append(
+                                {"step": 4, "action": "upload_cv", "selector": selector}
+                            )
+                            break
+                    except Exception as exc:
+                        logger.debug(f"Could not upload to {selector}: {exc}")
+
+            screenshot_path = job_folder / f"apply_step4_uploaded_{timestamp}.png"
+            await page.screenshot(path=screenshot_path)
+            screenshots.append(str(screenshot_path))
+
+            # Step 5: Look for unknown/required fields
+            # Check for empty required fields
+            required_inputs = await page.query_selector_all('input[required]:not([type="file"])')
+            required_selects = await page.query_selector_all("select[required]")
+            required_textareas = await page.query_selector_all("textarea[required]")
+
+            all_required = required_inputs + required_selects + required_textareas
+
+            for element in all_required:
+                try:
+                    value = await element.input_value() if hasattr(element, "input_value") else ""
+                    if not value:
+                        # Get field label
+                        label_text = ""
+                        try:
+                            label_element = await page.query_selector(
+                                f'label[for="{await element.get_attribute("id")}"]'
+                            )
+                            if label_element:
+                                label_text = await label_element.inner_text()
+                        except Exception:
+                            pass
+
+                        field_name = await element.get_attribute("name") or ""
+                        field_type = await element.get_attribute("type") or "text"
+                        tag_name = await element.evaluate("el => el.tagName.toLowerCase()")
+
+                        if tag_name == "select":
+                            field_type = "select"
+                        elif tag_name == "textarea":
+                            field_type = "textarea"
+
+                        required_fields.append(
+                            RequiredField(
+                                selector=f'[name="{field_name}"]' if field_name else str(element),
+                                field_type=field_type,
+                                label=label_text or field_name,
+                            )
+                        )
+                except Exception as exc:
+                    logger.debug(f"Error checking required field: {exc}")
+
+            if required_fields:
+                logger.warning(f"Found {len(required_fields)} unfilled required fields")
+                screenshot_path = job_folder / f"apply_needs_input_{timestamp}.png"
+                await page.screenshot(path=screenshot_path)
+                screenshots.append(str(screenshot_path))
+
+                evidence_path = job_folder / f"evidence_{timestamp}.json"
+                evidence_path.write_text(json.dumps(evidence_data, indent=2))
+
+                await browser.close()
+                return ApplyResponse(
+                    job_id=job_id,
+                    status="NEEDS_INPUT",
+                    method="BROWSER",
+                    screenshots=screenshots,
+                    required_fields=required_fields,
+                    evidence_path=str(evidence_path),
+                )
+
+            # Step 6: Submit the form
+            submit_selectors = [
+                'button[type="submit"]',
+                'input[type="submit"]',
+                'button:has-text("Submit")',
+                'button:has-text("Apply")',
+                'button:has-text("Send")',
+            ]
+
+            submitted = False
+            for selector in submit_selectors:
+                try:
+                    element = await page.query_selector(selector)
+                    if element and await element.is_visible():
+                        await element.click()
+                        submitted = True
+                        logger.info(f"Clicked submit button: {selector}")
+                        evidence_data["steps"].append({"step": 6, "action": "submit", "selector": selector})
+                        break
+                except Exception as exc:
+                    logger.debug(f"Could not click {selector}: {exc}")
+
+            if not submitted:
+                raise RuntimeError("Could not find submit button")
+
+            # Wait for navigation or confirmation
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10000)
+            except PlaywrightTimeout:
+                logger.warning("Timeout waiting for page load after submit")
+
+            screenshot_path = job_folder / f"apply_step6_submitted_{timestamp}.png"
+            await page.screenshot(path=screenshot_path)
+            screenshots.append(str(screenshot_path))
+
+            # Try to extract confirmation ID
+            confirmation_selectors = [
+                '[class*="confirmation"]',
+                '[id*="confirmation"]',
+                '[class*="success"]',
+                'h1',
+                'h2',
+            ]
+
+            for selector in confirmation_selectors:
+                try:
+                    element = await page.query_selector(selector)
+                    if element:
+                        text = await element.inner_text()
+                        if any(
+                            keyword in text.lower()
+                            for keyword in ["confirmation", "success", "submitted", "received"]
+                        ):
+                            confirmation_id = text[:100]  # Limit length
+                            break
+                except Exception:
+                    pass
+
+            evidence_data["confirmation_id"] = confirmation_id
+            evidence_data["success"] = True
+
+            evidence_path = job_folder / f"evidence_{timestamp}.json"
+            evidence_path.write_text(json.dumps(evidence_data, indent=2))
+
+            await browser.close()
+
+            # Send notification after successful application
+            await _send_application_notification(
+                job_data=job_data,
+                confirmation_id=confirmation_id,
+                evidence_path=str(evidence_path),
+            )
+
+            return ApplyResponse(
+                job_id=job_id,
+                status="SUCCESS",
+                method="BROWSER",
+                confirmation_id=confirmation_id,
+                evidence_path=str(evidence_path),
+                screenshots=screenshots,
+            )
+
+    except Exception as exc:
+        logger.error(f"Browser automation error: {exc}")
+        raise
+
+
+async def _apply_via_browser_with_audit(
+    apply_url: str,
+    job_id: str,
+    full_name: str,
+    email: str,
+    phone: str,
+    job_folder: Path,
+    job_data: dict,
+    timestamp: str,
+    audit_run_id: str,
+    apply_start: str,
+) -> ApplyResponse:
+    """Wrapper for _apply_via_browser with audit logging.
+
+    Args:
+        apply_url: Application URL
+        job_id: Job ID
+        full_name: Applicant full name
+        email: Applicant email
+        phone: Applicant phone
+        job_folder: Path to job folder
+        job_data: Job data from dashboard
+        timestamp: Timestamp for file naming
+        audit_run_id: Audit run ID
+        apply_start: Start timestamp
+
+    Returns:
+        ApplyResponse with results
+    """
+    result = await _apply_via_browser(
+        apply_url=apply_url,
+        job_id=job_id,
+        full_name=full_name,
+        email=email,
+        phone=phone,
+        job_folder=job_folder,
+        job_data=job_data,
+        timestamp=timestamp,
+    )
+
+    # Log audit entry
+    artifacts = []
+    if result.evidence_path:
+        artifacts.append(create_artifact_record(result.evidence_path, "evidence"))
+    for screenshot in result.screenshots:
+        artifacts.append(create_artifact_record(screenshot, "screenshot"))
+
+    await log_audit_entry(
+        run_id=audit_run_id,
+        operation="APPLY",
+        timestamp_start=apply_start,
+        timestamp_end=datetime.now().isoformat(),
+        status=result.status,
+        artifacts=artifacts,
+        error_message=result.error_message,
+        metadata={
+            "job_id": job_id,
+            "confirmation_id": result.confirmation_id,
+            "method": result.method,
+        },
+    )
+
+    return result
+
+
+async def _apply_via_api_with_audit(
+    source: str,
+    apply_url: str,
+    job_id: str,
+    full_name: str,
+    email: str,
+    phone: str,
+    job_folder: Path,
+    job_data: dict,
+    timestamp: str,
+    audit_run_id: str,
+    apply_start: str,
+) -> ApplyResponse:
+    """Wrapper for _apply_via_api with audit logging.
+
+    Args:
+        source: Source system (greenhouse or lever)
+        apply_url: Application URL
+        job_id: Job ID
+        full_name: Applicant full name
+        email: Applicant email
+        phone: Applicant phone
+        job_folder: Path to job folder
+        job_data: Job data from dashboard
+        timestamp: Timestamp: Timestamp for file naming
+        audit_run_id: Audit run ID
+        apply_start: Start timestamp
+
+    Returns:
+        ApplyResponse with results
+    """
+    result = await _apply_via_api(
+        source=source,
+        apply_url=apply_url,
+        job_id=job_id,
+        full_name=full_name,
+        email=email,
+        phone=phone,
+        job_folder=job_folder,
+        job_data=job_data,
+        timestamp=timestamp,
+    )
+
+    # Log audit entry
+    artifacts = []
+    if result.evidence_path:
+        artifacts.append(create_artifact_record(result.evidence_path, "evidence"))
+
+    await log_audit_entry(
+        run_id=audit_run_id,
+        operation="APPLY",
+        timestamp_start=apply_start,
+        timestamp_end=datetime.now().isoformat(),
+        status=result.status,
+        artifacts=artifacts,
+        error_message=result.error_message,
+        metadata={
+            "job_id": job_id,
+            "confirmation_id": result.confirmation_id,
+            "method": result.method,
+        },
+    )
+
+    return result
+
+
+async def _apply_via_browser_original(
     apply_url: str,
     job_id: str,
     full_name: str,
