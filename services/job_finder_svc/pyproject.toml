@@ -3,7 +3,13 @@ name = "job-finder-svc"
 version = "0.1.0"
 description = "Job finder service"
 requires-python = ">=3.11"
-dependencies = ["fastapi>=0.111.0", "uvicorn[standard]>=0.29.0"]
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+    "httpx>=0.27.0",
+    "beautifulsoup4>=4.8.0,<4.9.dev0",
+    "lxml>=4.9.0",
+]
 
 [project.optional-dependencies]
 dev = ["pytest"]
