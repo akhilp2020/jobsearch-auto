@@ -11,7 +11,13 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, HTTPException
 
-from .models import TailorRequest, TailorResponse
+from .models import (
+    TailorRequest,
+    TailorResponse,
+    ValidateRequest,
+    ValidateResponse,
+    ValidationViolation,
+)
 from .tailor import CVTailor
 
 logging.basicConfig(level=logging.INFO)
@@ -191,6 +197,12 @@ async def _render_pdf(cv_html: str, job_folder: str, timestamp: str) -> str:
     return str(target_pdf_path)
 
 
+def _jobsearch_home() -> Path:
+    """Get JOBSEARCH_HOME directory."""
+    home = os.getenv("JOBSEARCH_HOME", str(Path.home() / "JobSearch"))
+    return Path(home)
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     """Return service health status."""
@@ -242,6 +254,65 @@ async def tailor_cv(request: TailorRequest) -> TailorResponse:
         cv_html=cv_html,
         pdf_path=pdf_path,
         diff_summary=diff_summary,
+    )
+
+
+@app.post("/validate", response_model=ValidateResponse)
+async def validate_artifacts(request: ValidateRequest) -> ValidateResponse:
+    """Validate artifacts against profile guardrails.
+
+    Args:
+        request: Validation request with artifact paths
+
+    Returns:
+        ValidateResponse with pass/fail and violations
+    """
+    import sys
+
+    # Add guardrails to path
+    try:
+        from guardrails import validate_artifacts as run_validation
+    except ImportError:
+        repo_root = Path(__file__).resolve().parents[4]
+        guardrails_path = repo_root / "libs" / "guardrails" / "src"
+        sys.path.insert(0, str(guardrails_path))
+        from guardrails import validate_artifacts as run_validation
+
+    # Get paths
+    jobsearch_home = _jobsearch_home()
+    profile_path = jobsearch_home / "profile" / "canonical_profile.json"
+
+    # Convert relative paths to absolute
+    artifact_paths = [jobsearch_home / path for path in request.artifact_paths]
+
+    # Run validation
+    result = run_validation(str(profile_path), [str(p) for p in artifact_paths])
+
+    # Convert to response model
+    violations = [
+        ValidationViolation(
+            artifact=v.artifact,
+            line=v.line,
+            reason=v.reason,
+        )
+        for v in result.violations
+    ]
+
+    # Fail if requested
+    if request.fail_on_violations and not result.passed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Validation failed with {len(violations)} violations",
+        )
+
+    logger.info(
+        f"Validation complete: {len(violations)} violations, passed={result.passed}"
+    )
+
+    return ValidateResponse(
+        passed=result.passed,
+        violations=violations,
+        suggestions=result.suggestions,
     )
 
 
