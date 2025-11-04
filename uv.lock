@@ -8,6 +8,7 @@ members = [
     "audit-svc",
     "cv-builder-svc",
     "doc-builder-svc",
+    "guardrails",
     "job-finder-svc",
     "job-ranker-svc",
     "jobsearch-auto",
@@ -374,6 +375,8 @@ version = "0.1.0"
 source = { editable = "services/doc_builder_svc" }
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx" },
+    { name = "pydantic" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -385,6 +388,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.111.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29.0" },
 ]
@@ -534,6 +539,20 @@ sdist = { url = "https://files.pythonhosted.org/packages/e9/c0/784b130a28f4ed612
 wheels = [
     { url = "https://files.pythonhosted.org/packages/35/a7/8532d8fffe6d1c388ad4941d678dd0da4d8da80434f2dbf4f35de0fa8029/fpdf2-2.8.5-py3-none-any.whl", hash = "sha256:2356b94e2a5fcbd1fe53ac5cbb83494e9003308860ab180050255ba50961d913", size = 301627, upload-time = "2025-10-29T14:17:57.685Z" },
 ]
+
+[[package]]
+name = "guardrails"
+version = "0.1.0"
+source = { editable = "libs/guardrails" }
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'dev'" }]
+provides-extras = ["dev"]
 
 [[package]]
 name = "h11"

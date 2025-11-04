@@ -1,0 +1,16 @@
+[project]
+name = "guardrails"
+version = "0.1.0"
+description = "Validation guardrails for job search artifacts"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
